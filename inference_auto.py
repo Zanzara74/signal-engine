@@ -5,6 +5,7 @@ inference_auto.py
 • Reads a two-col CSV: DateRaw,Ticker
 • Renames to event_timestamp,symbol
 • Computes pct_return + entry_price via yfinance
+• Saves signals CSV
 • Uploads CSV to Google Drive
 • Sends a Telegram alert with symbol, price, date/time
 """
@@ -19,7 +20,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-# CONFIG
+# ── CONFIG ─────────────────────────────────────────────────────────
 SERVICE_ACCOUNT_JSON = os.environ['SERVICE_ACCOUNT_JSON']
 DRIVE_FOLDER_ID      = os.environ['DRIVE_FOLDER_ID']
 TELEGRAM_BOT_TOKEN   = os.environ['TELEGRAM_BOT_TOKEN']
@@ -30,7 +31,9 @@ MODEL_FILE     = 'model.pkl'
 OUTPUT_FOLDER  = 'daily_signals'
 SERVICE_JSON   = 'service_account.json'
 
+# ── DRIVE SETUP ───────────────────────────────────────────────────────
 def init_drive():
+    # write service-account JSON to disk
     with open(SERVICE_JSON, 'w') as f:
         f.write(SERVICE_ACCOUNT_JSON)
     creds = service_account.Credentials.from_service_account_file(
@@ -39,9 +42,12 @@ def init_drive():
     )
     return build('drive', 'v3', credentials=creds)
 
+# ── LOAD DATA ──────────────────────────────────────────────────────────
 def load_data():
+    # explicitly name two columns
     df = pd.read_csv(EVENTS_FILE, header=0, names=['DateRaw','Ticker'])
     df = df.rename(columns={'Ticker':'symbol'})
+    # parse date
     df['event_timestamp'] = pd.to_datetime(
         df['DateRaw'], format='%Y-%m-%d', errors='coerce', utc=True
     )
@@ -49,9 +55,11 @@ def load_data():
         raise ValueError("Parsed no dates from DateRaw!")
     return df
 
+# ── LOAD MODEL ─────────────────────────────────────────────────────────
 def load_model():
     return joblib.load(MODEL_FILE)
 
+# ── FEATURE ENGINEERING ────────────────────────────────────────────────
 def compute_pct_return(symbol, ts):
     try:
         hist = yf.Ticker(symbol).history(
@@ -74,23 +82,28 @@ def fetch_price(symbol, ts):
     except:
         return None
 
+# ── RUN INFERENCE ───────────────────────────────────────────────────────
 def run_inference(df, model):
     df['entry_time'] = df['event_timestamp']
     df['pct_return'] = df.apply(
-        lambda r: compute_pct_return(r['symbol'], r['entry_time']), axis=1
+        lambda r: compute_pct_return(r['symbol'], r['entry_time']),
+        axis=1
     )
     X = df[['pct_return']]
     df['signal'] = model.predict(X)
     buys = df[df['signal'] == 1].copy()
     buys['entry_price'] = buys.apply(
-        lambda r: fetch_price(r['symbol'], r['entry_time']), axis=1
+        lambda r: fetch_price(r['symbol'], r['entry_time']),
+        axis=1
     )
     return buys[['symbol','entry_price','entry_time']]
 
+# ── SAVE & UPLOAD ───────────────────────────────────────────────────────
 def save_and_upload(drive_svc, df):
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     date_str = datetime.utcnow().strftime('%Y-%m-%d')
     path = f"{OUTPUT_FOLDER}/signals_{date_str}.csv"
+    # format entry_time for readability
     df['entry_time'] = df['entry_time'].dt.strftime('%d/%m/%y %H:%M')
     df.to_csv(path, index=False)
     meta = {'name': os.path.basename(path), 'parents': [DRIVE_FOLDER_ID]}
@@ -98,13 +111,12 @@ def save_and_upload(drive_svc, df):
     drive_svc.files().create(body=meta, media_body=media).execute()
     return path
 
-from datetime import datetime  # make sure this is near the top of your file
-
+# ── TELEGRAM NOTIFY ─────────────────────────────────────────────────────
 def notify_telegram(df, csv_path):
     if df.empty:
         text = "✅ No BUY signals today."
     else:
-        # properly closed f-string and newline
+        # properly closed f-string with newline
         text = f"📈 BUY signals for {datetime.utcnow().strftime('%d/%m/%y')} (GMT):\n"
         for _, r in df.iterrows():
             d, t = r['entry_time'].split(' ')
@@ -117,12 +129,13 @@ def notify_telegram(df, csv_path):
         params = {'chat_id': TELEGRAM_CHAT_ID, 'caption': text}
         requests.post(url, params=params, files=files)
 
+# ── MAIN ────────────────────────────────────────────────────────────────
 def main():
     drive = init_drive()
-    df = load_data()
+    df    = load_data()
     model = load_model()
-    out = run_inference(df, model)
-    csv = save_and_upload(drive, out)
+    out   = run_inference(df, model)
+    csv   = save_and_upload(drive, out)
     notify_telegram(out, csv)
 
 if __name__ == "__main__":
