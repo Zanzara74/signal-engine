@@ -26,12 +26,11 @@ SERVICE_ACCOUNT_JSON = os.environ['SERVICE_ACCOUNT_JSON']
 DRIVE_FOLDER_ID      = os.environ['DRIVE_FOLDER_ID']
 TELEGRAM_BOT_TOKEN   = os.environ['TELEGRAM_BOT_TOKEN']
 TELEGRAM_CHAT_ID     = os.environ['TELEGRAM_CHAT_ID']
+SERVICE_JSON         = 'service_account.json'
+OUTPUT_BASE          = 'daily_signals'
 
-SERVICE_JSON = 'service_account.json'
-OUTPUT_BASE  = 'daily_signals'
 
-
-# ── DRIVE INITIALIZATION ──────────────────────────────────────────────
+# ── DRIVE SETUP ───────────────────────────────────────────────────────
 def init_drive():
     with open(SERVICE_JSON, 'w') as f:
         f.write(SERVICE_ACCOUNT_JSON)
@@ -51,7 +50,7 @@ def compute_pct_return(symbol, ts):
         )['Close']
         if len(hist) >= 2:
             return (hist.iloc[-1] - hist.iloc[-2]) / hist.iloc[-2]
-    except:
+    except Exception:
         pass
     return 0.0
 
@@ -63,23 +62,20 @@ def fetch_price(symbol, ts):
             end=ts.date() + timedelta(days=1)
         )['Close']
         return float(hist.iloc[-1])
-    except:
+    except Exception:
         return None
 
 
-# ── SINGLE-SCENARIO PROCESSOR ─────────────────────────────────────────
+# ── PROCESS ONE SCENARIO ──────────────────────────────────────────────
 def process_scenario(name, csv_path, model_path, drive_svc):
-    # 1) Load events
     df = pd.read_csv(csv_path, header=0, names=['DateRaw','Ticker'])
-    df = df.rename(columns={'Ticker':'symbol'})
+    df = df.rename(columns={'Ticker': 'symbol'})
     df['event_timestamp'] = pd.to_datetime(
         df['DateRaw'], format='%Y-%m-%d', errors='coerce', utc=True
     )
 
-    # 2) Load model
     model = joblib.load(model_path)
 
-    # 3) Feature-engineer & predict
     df['entry_time'] = df['event_timestamp']
     df['pct_return'] = df.apply(
         lambda r: compute_pct_return(r['symbol'], r['entry_time']),
@@ -88,25 +84,21 @@ def process_scenario(name, csv_path, model_path, drive_svc):
     X = df[['pct_return']]
     df['signal'] = model.predict(X)
 
-    # 4) Filter BUYs
     buys = df[df['signal'] == 1].copy()
     if buys.empty:
         return None
 
-    # 5) Fetch entry prices & format time
     buys['entry_price'] = buys.apply(
         lambda r: fetch_price(r['symbol'], r['entry_time']), axis=1
     )
     buys['entry_time'] = buys['entry_time'].dt.strftime('%d/%m/%y %H:%M')
 
-    # 6) Save to CSV
     date_str = datetime.utcnow().strftime('%Y-%m-%d')
     folder   = os.path.join(OUTPUT_BASE, name)
     os.makedirs(folder, exist_ok=True)
     out_csv  = os.path.join(folder, f"{name}_signals_{date_str}.csv")
     buys[['symbol','entry_price','entry_time']].to_csv(out_csv, index=False)
 
-    # 7) Upload to Drive
     meta  = {'name': os.path.basename(out_csv), 'parents': [DRIVE_FOLDER_ID]}
     media = MediaFileUpload(out_csv, mimetype='text/csv')
     drive_svc.files().create(body=meta, media_body=media).execute()
@@ -114,15 +106,17 @@ def process_scenario(name, csv_path, model_path, drive_svc):
     return out_csv, buys
 
 
-# ── TELEGRAM NOTIFIER ─────────────────────────────────────────────────
+# ── TELEGRAM NOTIFICATION ─────────────────────────────────────────────
 def send_telegram(file_path, buys, scenario_name):
     date_hdr = datetime.utcnow().strftime('%d/%m/%y')
     if not buys.empty:
+        # properly closed f-string with newline
         caption = f"📈 {scenario_name.upper()} signals for {date_hdr} (GMT):\n"
         for _, r in buys.iterrows():
             d, t = r['entry_time'].split(' ')
             p    = r['entry_price']
             caption += f"• {r['symbol']} @ {p if p is not None else 'N/A'} on {d} {t} GMT\n"
+
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
         with open(file_path, 'rb') as f:
             requests.post(
@@ -131,7 +125,7 @@ def send_telegram(file_path, buys, scenario_name):
                 files={'document': f}
             )
     else:
-        # Should rarely be called here, but just in case
+        # fallback (rare)
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             data={'chat_id': TELEGRAM_CHAT_ID,
@@ -139,7 +133,7 @@ def send_telegram(file_path, buys, scenario_name):
         )
 
 
-# ── MAIN ───────────────────────────────────────────────────────────────
+# ── MAIN ENTRYPOINT ───────────────────────────────────────────────────
 def main():
     drive = init_drive()
     any_signals = False
@@ -160,7 +154,6 @@ def main():
             print(f"ℹ️  No BUY signals for '{name}' today.")
 
     if not any_signals:
-        # No scenario produced any BUYs
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             data={'chat_id': TELEGRAM_CHAT_ID,
