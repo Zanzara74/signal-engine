@@ -19,7 +19,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-# ── CONFIG ─────────────────────────────────────────────────────────
+# CONFIG
 SERVICE_ACCOUNT_JSON = os.environ['SERVICE_ACCOUNT_JSON']
 DRIVE_FOLDER_ID      = os.environ['DRIVE_FOLDER_ID']
 TELEGRAM_BOT_TOKEN   = os.environ['TELEGRAM_BOT_TOKEN']
@@ -30,7 +30,6 @@ MODEL_FILE     = 'model.pkl'
 OUTPUT_FOLDER  = 'daily_signals'
 SERVICE_JSON   = 'service_account.json'
 
-# ── DRIVE SETUP ───────────────────────────────────────────────────────
 def init_drive():
     with open(SERVICE_JSON, 'w') as f:
         f.write(SERVICE_ACCOUNT_JSON)
@@ -40,7 +39,6 @@ def init_drive():
     )
     return build('drive', 'v3', credentials=creds)
 
-# ── LOAD DATA ──────────────────────────────────────────────────────────
 def load_data():
     df = pd.read_csv(EVENTS_FILE, header=0, names=['DateRaw','Ticker'])
     df = df.rename(columns={'Ticker':'symbol'})
@@ -51,11 +49,9 @@ def load_data():
         raise ValueError("Parsed no dates from DateRaw!")
     return df
 
-# ── LOAD MODEL ─────────────────────────────────────────────────────────
 def load_model():
     return joblib.load(MODEL_FILE)
 
-# ── FEATURE ENGINEERING ────────────────────────────────────────────────
 def compute_pct_return(symbol, ts):
     try:
         hist = yf.Ticker(symbol).history(
@@ -78,21 +74,19 @@ def fetch_price(symbol, ts):
     except:
         return None
 
-# ── RUN INFERENCE ───────────────────────────────────────────────────────
 def run_inference(df, model):
-    df['entry_time']  = df['event_timestamp']
-    df['pct_return']  = df.apply(
+    df['entry_time'] = df['event_timestamp']
+    df['pct_return'] = df.apply(
         lambda r: compute_pct_return(r['symbol'], r['entry_time']), axis=1
     )
     X = df[['pct_return']]
-    df['signal']      = model.predict(X)
-    buys = df[df['signal']==1].copy()
+    df['signal'] = model.predict(X)
+    buys = df[df['signal'] == 1].copy()
     buys['entry_price'] = buys.apply(
         lambda r: fetch_price(r['symbol'], r['entry_time']), axis=1
     )
     return buys[['symbol','entry_price','entry_time']]
 
-# ── SAVE & UPLOAD ───────────────────────────────────────────────────────
 def save_and_upload(drive_svc, df):
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     date_str = datetime.utcnow().strftime('%Y-%m-%d')
@@ -104,31 +98,27 @@ def save_and_upload(drive_svc, df):
     drive_svc.files().create(body=meta, media_body=media).execute()
     return path
 
-# ── TELEGRAM NOTIFY ─────────────────────────────────────────────────────
 def notify_telegram(df, csv_path):
     if df.empty:
         text = "✅ No BUY signals today."
     else:
-        text = f"📈 BUY signals for {datetime.utcnow().strftime('%d/%m/%y')} (GMT):
-"
+        text = f"📈 BUY signals for {datetime.utcnow().strftime('%d/%m/%y')} (GMT):\n"
         for _, r in df.iterrows():
             d,t = r['entry_time'].split(' ')
-            p   = r['entry_price']
-            text += f"• {r['symbol']} @ {p if p else 'N/A'} on {d} {t} GMT
-"
+            p = r['entry_price']
+            text += f"• {r['symbol']} @ {p if p else 'N/A'} on {d} {t} GMT\n"
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-    with open(csv_path,'rb') as f:
-        files={'document':f}
-        params={'chat_id':TELEGRAM_CHAT_ID,'caption':text}
+    with open(csv_path, 'rb') as f:
+        files = {'document': f}
+        params = {'chat_id': TELEGRAM_CHAT_ID, 'caption': text}
         requests.post(url, params=params, files=files)
 
-# ── MAIN ────────────────────────────────────────────────────────────────
 def main():
     drive = init_drive()
-    df    = load_data()
+    df = load_data()
     model = load_model()
-    out   = run_inference(df, model)
-    csv   = save_and_upload(drive, out)
+    out = run_inference(df, model)
+    csv = save_and_upload(drive, out)
     notify_telegram(out, csv)
 
 if __name__ == "__main__":
