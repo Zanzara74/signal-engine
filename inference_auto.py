@@ -98,18 +98,22 @@ def save_and_upload(drive_svc, df):
     drive_svc.files().create(body=meta, media_body=media).execute()
     return path
 
+from datetime import datetime  # make sure this is near the top of your file
+
 def notify_telegram(df, csv_path):
     if df.empty:
         text = "✅ No BUY signals today."
     else:
+        # properly closed f-string and newline
         text = f"📈 BUY signals for {datetime.utcnow().strftime('%d/%m/%y')} (GMT):\n"
         for _, r in df.iterrows():
-            d,t = r['entry_time'].split(' ')
-            p = r['entry_price']
-            text += f"• {r['symbol']} @ {p if p else 'N/A'} on {d} {t} GMT\n"
+            d, t = r['entry_time'].split(' ')
+            p    = r['entry_price']
+            text += f"• {r['symbol']} @ {p if p is not None else 'N/A'} on {d} {t} GMT\n"
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
     with open(csv_path, 'rb') as f:
-        files = {'document': f}
+        files  = {'document': f}
         params = {'chat_id': TELEGRAM_CHAT_ID, 'caption': text}
         requests.post(url, params=params, files=files)
 
